@@ -849,6 +849,46 @@ pub fn createDirPath(dir: Dir, io: Io, sub_path: []const u8) CreateDirPathError!
 
 pub const CreatePathStatus = enum { existed, created };
 
+/// The walk behind `createDirPath`, for `Io` implementations: every one
+/// that implements `dirCreateDirPath` this way calls this, so the walk's
+/// termination is argued once. `ops` makes and inspects one directory at a
+/// time, relative to the directory the walk starts in:
+/// - `ops.createDir(path)`: `CreateDirError!void`, failing with
+///   `error.PathAlreadyExists` or `error.FileNotFound` as `mkdirat` does;
+/// - `ops.isDir(path)`: `StatFileError!bool`.
+///
+/// It creates the whole path first; while that fails with
+/// `error.FileNotFound` (a parent is missing) it steps back a component,
+/// and once a component exists or is made it only steps forward. That is
+/// what ends it: a component that existed and then fails with
+/// `error.FileNotFound` is not a missing parent but a directory that can't
+/// take new entries (removed, or `.` naming a deleted working directory),
+/// and stepping back would find it again forever. A component in the way
+/// that isn't a directory (a dangling symlink, a file) is `error.NotDir`.
+pub fn createDirPathWalk(sub_path: []const u8, ops: anytype) CreateDirPathError!CreatePathStatus {
+    var it = path.componentIterator(sub_path);
+    var status: CreatePathStatus = .existed;
+    var component = it.last() orelse return error.BadPathName;
+    var found_existing = false;
+    while (true) {
+        if (ops.createDir(component.path)) |_| {
+            status = .created;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {
+                if (!try ops.isDir(component.path)) return error.NotDir;
+            },
+            error.FileNotFound => |e| {
+                if (found_existing) return e;
+                component = it.previous() orelse return e;
+                continue;
+            },
+            else => |e| return e,
+        }
+        found_existing = true;
+        component = it.next() orelse return status;
+    }
+}
+
 /// Same as `createDirPath` except returns whether the path already existed or was
 /// successfully created.
 pub fn createDirPathStatus(dir: Dir, io: Io, sub_path: []const u8, permissions: Permissions) CreateDirPathError!CreatePathStatus {

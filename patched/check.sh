@@ -20,4 +20,12 @@ echo "pick's rows: $rows"
 # std.heap.ArenaAllocator: a request that does not fit grows the node once.
 "$zig" test "$here/arena_growth.zig"
 
-echo "PASS: both patches"
+# Dir.createDirPathWalk: `./a/b` in a deleted working directory is
+# FileNotFound, as `a/b` is; unpatched it loops forever.
+"$zig" build-exe "$here/create_dir_path.zig" -femit-bin="$work/mkpath"
+mkdir "$work/gone"
+got=$(cd "$work/gone" && rmdir "$work/gone" && timeout 10 "$work/mkpath" ./a/b 2>&1) || got="exit $? (124 is the timeout)"
+echo "./a/b in a deleted directory: $got"
+[ "$got" = "error.FileNotFound" ] || { echo "FAIL: expected error.FileNotFound"; exit 1; }
+
+echo "PASS: all three patches"
