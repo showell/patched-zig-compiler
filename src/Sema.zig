@@ -8346,37 +8346,23 @@ fn zirFunc(
     const ip = &zcu.intern_pool;
 
     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].pl_node;
-    const extra = sema.code.extraData(Zir.Inst.Func, inst_data.payload_index);
+    const payload = sema.code.getFnPayload(inst);
     const target = zcu.getTarget();
     const ret_ty_src = block.src(.{ .node_offset_fn_type_ret_ty = inst_data.src_node });
     const src = block.nodeOffset(inst_data.src_node);
 
-    var extra_index = extra.end;
-
-    const ret_ty: Type = if (extra.data.ret_ty.is_generic)
+    const ret_ty: Type = if (payload.ret_ty_is_generic)
         .generic_poison
-    else switch (extra.data.ret_ty.body_len) {
-        0 => .void,
-        1 => blk: {
-            const ret_ty_ref: Zir.Inst.Ref = @fromBackingInt(@intCast(sema.code.extra[extra_index]));
-            extra_index += 1;
-            break :blk try sema.resolveType(block, ret_ty_src, ret_ty_ref);
-        },
-        else => blk: {
-            const ret_ty_body = sema.code.bodySlice(extra_index, extra.data.ret_ty.body_len);
-            extra_index += ret_ty_body.len;
+    else if (payload.ret_ty_body.len != 0) blk: {
+        const ret_ty_val = try sema.resolveGenericBody(block, ret_ty_src, payload.ret_ty_body, inst, .type, .{ .simple = .fn_ret_ty });
+        break :blk ret_ty_val.toType();
+    } else if (payload.ret_ty_ref == .void_type)
+        .void
+    else
+        try sema.resolveType(block, ret_ty_src, payload.ret_ty_ref);
 
-            const ret_ty_val = try sema.resolveGenericBody(block, ret_ty_src, ret_ty_body, inst, .type, .{ .simple = .fn_ret_ty });
-            break :blk ret_ty_val.toType();
-        },
-    };
-
-    var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-    const has_body = extra.data.body_len != 0;
-    if (has_body) {
-        extra_index += extra.data.body_len;
-        src_locs = sema.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-    }
+    const has_body = payload.body.len != 0;
+    const src_locs = payload.src_locs orelse undefined;
 
     // If this instruction has a body, then it's a function declaration, and we decide
     // the callconv based on whether it is exported. Otherwise, the callconv defaults
@@ -24933,29 +24919,20 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     const ip = &zcu.intern_pool;
 
     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].pl_node;
-    const extra = sema.code.extraData(Zir.Inst.FuncFancy, inst_data.payload_index);
+    const payload = sema.code.getFnPayload(inst);
     const target = zcu.getTarget();
 
     const cc_src = block.src(.{ .node_offset_fn_type_cc = inst_data.src_node });
     const ret_src = block.src(.{ .node_offset_fn_type_ret_ty = inst_data.src_node });
-    const has_body = extra.data.body_len != 0;
+    const has_body = payload.body.len != 0;
 
-    var extra_index: usize = extra.end;
-
-    const cc: std.lang.CallingConvention = if (extra.data.bits.has_cc_body) blk: {
-        const body_len = sema.code.extra[extra_index];
-        extra_index += 1;
-        const body = sema.code.bodySlice(extra_index, body_len);
-        extra_index += body.len;
-
+    const cc: std.lang.CallingConvention = if (payload.cc_body.len != 0) blk: {
         const cc_ty = try sema.getStdLangType(cc_src, .CallingConvention);
-        const val = try sema.resolveGenericBody(block, cc_src, body, inst, cc_ty, .{ .simple = .@"callconv" });
+        const val = try sema.resolveGenericBody(block, cc_src, payload.cc_body, inst, cc_ty, .{ .simple = .@"callconv" });
         break :blk try sema.analyzeValueAsCallconv(block, cc_src, val);
-    } else if (extra.data.bits.has_cc_ref) blk: {
-        const cc_ref: Zir.Inst.Ref = @fromBackingInt(@intCast(sema.code.extra[extra_index]));
-        extra_index += 1;
+    } else if (payload.cc_ref != .none) blk: {
         const cc_ty = try sema.getStdLangType(cc_src, .CallingConvention);
-        const uncoerced_cc = sema.resolveInst(cc_ref);
+        const uncoerced_cc = sema.resolveInst(payload.cc_ref);
         const coerced_cc = try sema.coerce(block, cc_ty, uncoerced_cc, cc_src);
         const cc_val = try sema.resolveConstDefinedValue(block, cc_src, coerced_cc, .{ .simple = .@"callconv" });
         break :blk try sema.analyzeValueAsCallconv(block, cc_src, cc_val);
@@ -24988,39 +24965,22 @@ fn zirFuncFancy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
         break :cc .auto;
     };
 
-    const ret_ty: Type = if (extra.data.bits.has_ret_ty_body) blk: {
-        const body_len = sema.code.extra[extra_index];
-        extra_index += 1;
-        const body = sema.code.bodySlice(extra_index, body_len);
-        extra_index += body.len;
-        if (extra.data.bits.ret_ty_is_generic) break :blk .generic_poison;
+    const ret_ty: Type = if (payload.ret_ty_is_generic)
+        .generic_poison
+    else if (payload.ret_ty_body.len != 0) blk: {
+        const val = try sema.resolveGenericBody(block, ret_src, payload.ret_ty_body, inst, .type, .{ .simple = .fn_ret_ty });
+        break :blk val.toType();
+    } else if (payload.ret_ty_ref == .void_type)
+        .void
+    else
+        try sema.resolveType(block, ret_src, payload.ret_ty_ref);
 
-        const val = try sema.resolveGenericBody(block, ret_src, body, inst, .type, .{ .simple = .fn_ret_ty });
-        const ty = val.toType();
-        break :blk ty;
-    } else if (extra.data.bits.has_ret_ty_ref) blk: {
-        const ret_ty_ref: Zir.Inst.Ref = @fromBackingInt(@intCast(sema.code.extra[extra_index]));
-        extra_index += 1;
-        if (extra.data.bits.ret_ty_is_generic) break :blk .generic_poison;
+    const noalias_bits = payload.noalias_bits;
+    const src_locs = payload.src_locs orelse undefined;
 
-        break :blk try sema.resolveType(block, ret_src, ret_ty_ref);
-    } else .void;
-
-    const noalias_bits: u32 = if (extra.data.bits.has_any_noalias) blk: {
-        const x = sema.code.extra[extra_index];
-        extra_index += 1;
-        break :blk x;
-    } else 0;
-
-    var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-    if (has_body) {
-        extra_index += extra.data.body_len;
-        src_locs = sema.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-    }
-
-    const is_var_args = extra.data.bits.is_var_args;
-    const is_inferred_error = extra.data.bits.is_inferred_error;
-    const is_noinline = extra.data.bits.is_noinline;
+    const is_var_args = payload.is_var_args;
+    const is_inferred_error = payload.is_inferred_error;
+    const is_noinline = payload.is_noinline;
 
     return sema.funcCommon(
         block,

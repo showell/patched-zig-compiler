@@ -491,9 +491,7 @@ const Writer = struct {
 
             .param, .param_comptime => try self.writeParam(stream, inst),
 
-            .func => try self.writeFunc(stream, inst, false),
-            .func_inferred => try self.writeFunc(stream, inst, true),
-            .func_fancy => try self.writeFuncFancy(stream, inst),
+            .func, .func_inferred, .func_fancy => try self.writeFunc(stream, inst),
 
             .@"unreachable" => try self.writeUnreachable(stream, inst),
 
@@ -1899,115 +1897,23 @@ const Writer = struct {
         try stream.print(", \"{f}\")", .{std.zig.fmtString(str)});
     }
 
-    fn writeFunc(
-        self: *Writer,
-        stream: *std.Io.Writer,
-        inst: Zir.Inst.Index,
-        inferred_error_set: bool,
-    ) !void {
+    fn writeFunc(self: *Writer, stream: *std.Io.Writer, inst: Zir.Inst.Index) !void {
         const inst_data = self.code.instructions.items(.data)[@backingInt(inst)].pl_node;
-        const extra = self.code.extraData(Zir.Inst.Func, inst_data.payload_index);
-
-        var extra_index = extra.end;
-        var ret_ty_ref: Zir.Inst.Ref = .none;
-        var ret_ty_body: []const Zir.Inst.Index = &.{};
-
-        switch (extra.data.ret_ty.body_len) {
-            0 => {
-                ret_ty_ref = .void_type;
-            },
-            1 => {
-                ret_ty_ref = @as(Zir.Inst.Ref, @fromBackingInt(@intCast(self.code.extra[extra_index])));
-                extra_index += 1;
-            },
-            else => {
-                ret_ty_body = self.code.bodySlice(extra_index, extra.data.ret_ty.body_len);
-                extra_index += ret_ty_body.len;
-            },
-        }
-
-        const body = self.code.bodySlice(extra_index, extra.data.body_len);
-        extra_index += body.len;
-
-        var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-        if (body.len != 0) {
-            src_locs = self.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-        }
+        const payload = self.code.getFnPayload(inst);
         return self.writeFuncCommon(
             stream,
-            inferred_error_set,
-            false,
-            false,
-
-            .none,
-            &.{},
-            ret_ty_ref,
-            ret_ty_body,
-            extra.data.ret_ty.is_generic,
-
-            body,
+            payload.is_inferred_error,
+            payload.is_var_args,
+            payload.is_noinline,
+            payload.cc_ref,
+            payload.cc_body,
+            payload.ret_ty_ref,
+            payload.ret_ty_body,
+            payload.ret_ty_is_generic,
+            payload.body,
             inst_data.src_node,
-            src_locs,
-            0,
-        );
-    }
-
-    fn writeFuncFancy(self: *Writer, stream: *std.Io.Writer, inst: Zir.Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[@backingInt(inst)].pl_node;
-        const extra = self.code.extraData(Zir.Inst.FuncFancy, inst_data.payload_index);
-
-        var extra_index: usize = extra.end;
-        var cc_ref: Zir.Inst.Ref = .none;
-        var cc_body: []const Zir.Inst.Index = &.{};
-        var ret_ty_ref: Zir.Inst.Ref = .none;
-        var ret_ty_body: []const Zir.Inst.Index = &.{};
-
-        if (extra.data.bits.has_cc_body) {
-            const body_len = self.code.extra[extra_index];
-            extra_index += 1;
-            cc_body = self.code.bodySlice(extra_index, body_len);
-            extra_index += cc_body.len;
-        } else if (extra.data.bits.has_cc_ref) {
-            cc_ref = @as(Zir.Inst.Ref, @fromBackingInt(@intCast(self.code.extra[extra_index])));
-            extra_index += 1;
-        }
-        if (extra.data.bits.has_ret_ty_body) {
-            const body_len = self.code.extra[extra_index];
-            extra_index += 1;
-            ret_ty_body = self.code.bodySlice(extra_index, body_len);
-            extra_index += ret_ty_body.len;
-        } else if (extra.data.bits.has_ret_ty_ref) {
-            ret_ty_ref = @as(Zir.Inst.Ref, @fromBackingInt(@intCast(self.code.extra[extra_index])));
-            extra_index += 1;
-        }
-
-        const noalias_bits: u32 = if (extra.data.bits.has_any_noalias) blk: {
-            const x = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk x;
-        } else 0;
-
-        const body = self.code.bodySlice(extra_index, extra.data.body_len);
-        extra_index += body.len;
-
-        var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-        if (body.len != 0) {
-            src_locs = self.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-        }
-        return self.writeFuncCommon(
-            stream,
-            extra.data.bits.is_inferred_error,
-            extra.data.bits.is_var_args,
-            extra.data.bits.is_noinline,
-            cc_ref,
-            cc_body,
-            ret_ty_ref,
-            ret_ty_body,
-            extra.data.bits.ret_ty_is_generic,
-            body,
-            inst_data.src_node,
-            src_locs,
-            noalias_bits,
+            payload.src_locs,
+            payload.noalias_bits,
         );
     }
 
@@ -2166,7 +2072,7 @@ const Writer = struct {
         ret_ty_is_generic: bool,
         body: []const Zir.Inst.Index,
         src_node: Ast.Node.Offset,
-        src_locs: Zir.Inst.Func.SrcLocs,
+        src_locs: ?Zir.Inst.Func.SrcLocs,
         noalias_bits: u32,
     ) !void {
         try self.writeOptionalInstRefOrBody(stream, "cc=", cc_ref, cc_body);
@@ -2183,10 +2089,10 @@ const Writer = struct {
         try stream.writeAll("body=");
         try self.writeBracedBody(stream, body);
         try stream.writeAll(") ");
-        if (body.len != 0) {
+        if (src_locs) |locs| {
             try stream.print("(lbrace={d}:{d},rbrace={d}:{d}) ", .{
-                src_locs.lbrace_line + 1, @as(u16, @truncate(src_locs.columns)) + 1,
-                src_locs.rbrace_line + 1, @as(u16, @truncate(src_locs.columns >> 16)) + 1,
+                locs.lbrace_line + 1, @as(u16, @truncate(locs.columns)) + 1,
+                locs.rbrace_line + 1, @as(u16, @truncate(locs.columns >> 16)) + 1,
             });
         }
         try self.writeSrcNode(stream, src_node);

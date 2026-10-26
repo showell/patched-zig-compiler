@@ -4469,72 +4469,23 @@ fn findTrackableInner(
         // Functions instructions are interesting and have a body.
         .func,
         .func_inferred,
+        .func_fancy,
         => {
-            const inst_data = datas[@backingInt(inst)].pl_node;
-            const extra = zir.extraData(Inst.Func, inst_data.payload_index);
+            const payload = zir.getFnPayload(inst);
 
-            if (extra.data.body_len == 0) {
+            if (payload.body.len == 0) {
                 // This is just a prototype. No need to track.
-                assert(extra.data.ret_ty.body_len < 2);
+                assert(payload.cc_body.len == 0);
+                assert(payload.ret_ty_body.len == 0);
                 return;
             }
 
             assert(contents.func_decl == null);
             contents.func_decl = inst;
 
-            var extra_index: usize = extra.end;
-            switch (extra.data.ret_ty.body_len) {
-                0 => {},
-                1 => extra_index += 1,
-                else => {
-                    const body = zir.bodySlice(extra_index, extra.data.ret_ty.body_len);
-                    extra_index += body.len;
-                    try zir.findTrackableBody(gpa, contents, defers, body);
-                },
-            }
-            const body = zir.bodySlice(extra_index, extra.data.body_len);
-            return zir.findTrackableBody(gpa, contents, defers, body);
-        },
-        .func_fancy => {
-            const inst_data = datas[@backingInt(inst)].pl_node;
-            const extra = zir.extraData(Inst.FuncFancy, inst_data.payload_index);
-
-            if (extra.data.body_len == 0) {
-                // This is just a prototype. No need to track.
-                assert(!extra.data.bits.has_cc_body);
-                assert(!extra.data.bits.has_ret_ty_body);
-                return;
-            }
-
-            assert(contents.func_decl == null);
-            contents.func_decl = inst;
-
-            var extra_index: usize = extra.end;
-
-            if (extra.data.bits.has_cc_body) {
-                const body_len = zir.extra[extra_index];
-                extra_index += 1;
-                const body = zir.bodySlice(extra_index, body_len);
-                try zir.findTrackableBody(gpa, contents, defers, body);
-                extra_index += body.len;
-            } else if (extra.data.bits.has_cc_ref) {
-                extra_index += 1;
-            }
-
-            if (extra.data.bits.has_ret_ty_body) {
-                const body_len = zir.extra[extra_index];
-                extra_index += 1;
-                const body = zir.bodySlice(extra_index, body_len);
-                try zir.findTrackableBody(gpa, contents, defers, body);
-                extra_index += body.len;
-            } else if (extra.data.bits.has_ret_ty_ref) {
-                extra_index += 1;
-            }
-
-            extra_index += @intFromBool(extra.data.bits.has_any_noalias);
-
-            const body = zir.bodySlice(extra_index, extra.data.body_len);
-            return zir.findTrackableBody(gpa, contents, defers, body);
+            try zir.findTrackableBody(gpa, contents, defers, payload.cc_body);
+            try zir.findTrackableBody(gpa, contents, defers, payload.ret_ty_body);
+            return zir.findTrackableBody(gpa, contents, defers, payload.body);
         },
 
         // Block instructions, recurse over the bodies.
@@ -4706,91 +4657,128 @@ pub fn getParamName(zir: Zir, param_inst: Inst.Index) ?NullTerminatedString {
     };
 }
 
-pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
-    const tags = zir.instructions.items(.tag);
-    const datas = zir.instructions.items(.data);
-    const info: struct {
-        param_block: Inst.Index,
-        body: []const Inst.Index,
-        ret_ty_ref: Inst.Ref,
-        ret_ty_body: []const Inst.Index,
-        ret_ty_is_generic: bool,
-        ies: bool,
-    } = switch (tags[@backingInt(fn_inst)]) {
-        .func, .func_inferred => |tag| blk: {
-            const inst_data = datas[@backingInt(fn_inst)].pl_node;
+/// The trailing data of a `func`, `func_inferred` or `func_fancy` instruction, decoded.
+/// Every reader of a function instruction's payload goes through `getFnPayload`, so
+/// the two layouts (`Inst.Func`, `Inst.FuncFancy`) are walked in one place only.
+pub const FnPayload = struct {
+    /// Points to the block that contains the param instructions for this function.
+    param_block: Inst.Index,
+    /// `.none` when the convention is a body (`cc_body`) or is omitted.
+    cc_ref: Inst.Ref,
+    cc_body: []const Inst.Index,
+    /// `.void_type` when the return type is omitted; `.none` when it is a body (`ret_ty_body`).
+    ret_ty_ref: Inst.Ref,
+    ret_ty_body: []const Inst.Index,
+    /// Whether the return type refers to one or more previous parameters.
+    ret_ty_is_generic: bool,
+    is_inferred_error: bool,
+    is_var_args: bool,
+    is_noinline: bool,
+    noalias_bits: u32,
+    /// Empty for a prototype: a function type or an extern function.
+    body: []const Inst.Index,
+    /// Present exactly when `body` is not empty.
+    src_locs: ?Inst.Func.SrcLocs,
+    /// The hash of the function prototype; present exactly when `body` is not empty.
+    proto_hash: ?std.zig.SrcHash,
+};
+
+pub fn getFnPayload(zir: Zir, fn_inst: Inst.Index) FnPayload {
+    const tag = zir.instructions.items(.tag)[@backingInt(fn_inst)];
+    const inst_data = zir.instructions.items(.data)[@backingInt(fn_inst)].pl_node;
+    var payload: FnPayload = .{
+        .param_block = undefined,
+        .cc_ref = .none,
+        .cc_body = &.{},
+        .ret_ty_ref = .void_type,
+        .ret_ty_body = &.{},
+        .ret_ty_is_generic = undefined,
+        .is_inferred_error = undefined,
+        .is_var_args = false,
+        .is_noinline = false,
+        .noalias_bits = 0,
+        .body = &.{},
+        .src_locs = null,
+        .proto_hash = null,
+    };
+    var extra_index: usize, const body_len: u32 = switch (tag) {
+        .func, .func_inferred => blk: {
             const extra = zir.extraData(Inst.Func, inst_data.payload_index);
+            payload.param_block = extra.data.param_block;
+            payload.ret_ty_is_generic = extra.data.ret_ty.is_generic;
+            payload.is_inferred_error = tag == .func_inferred;
 
-            var extra_index: usize = extra.end;
-            var ret_ty_ref: Inst.Ref = .none;
-            var ret_ty_body: []const Inst.Index = &.{};
-
+            var i: usize = extra.end;
             switch (extra.data.ret_ty.body_len) {
-                0 => {
-                    ret_ty_ref = .void_type;
-                },
+                0 => {},
                 1 => {
-                    ret_ty_ref = @fromBackingInt(@intCast(zir.extra[extra_index]));
-                    extra_index += 1;
+                    payload.ret_ty_ref = @fromBackingInt(@intCast(zir.extra[i]));
+                    i += 1;
                 },
                 else => {
-                    ret_ty_body = zir.bodySlice(extra_index, extra.data.ret_ty.body_len);
-                    extra_index += ret_ty_body.len;
+                    payload.ret_ty_ref = .none;
+                    payload.ret_ty_body = zir.bodySlice(i, extra.data.ret_ty.body_len);
+                    i += payload.ret_ty_body.len;
                 },
             }
-
-            const body = zir.bodySlice(extra_index, extra.data.body_len);
-            extra_index += body.len;
-
-            break :blk .{
-                .param_block = extra.data.param_block,
-                .ret_ty_ref = ret_ty_ref,
-                .ret_ty_body = ret_ty_body,
-                .body = body,
-                .ret_ty_is_generic = extra.data.ret_ty.is_generic,
-                .ies = tag == .func_inferred,
-            };
+            break :blk .{ i, extra.data.body_len };
         },
         .func_fancy => blk: {
-            const inst_data = datas[@backingInt(fn_inst)].pl_node;
             const extra = zir.extraData(Inst.FuncFancy, inst_data.payload_index);
+            const bits = extra.data.bits;
+            payload.param_block = extra.data.param_block;
+            payload.ret_ty_is_generic = bits.ret_ty_is_generic;
+            payload.is_inferred_error = bits.is_inferred_error;
+            payload.is_var_args = bits.is_var_args;
+            payload.is_noinline = bits.is_noinline;
 
-            var extra_index: usize = extra.end;
-            var ret_ty_ref: Inst.Ref = .none;
-            var ret_ty_body: []const Inst.Index = &.{};
-
-            if (extra.data.bits.has_cc_body) {
-                extra_index += zir.extra[extra_index] + 1;
-            } else if (extra.data.bits.has_cc_ref) {
-                extra_index += 1;
+            var i: usize = extra.end;
+            if (bits.has_cc_body) {
+                const cc_body_len = zir.extra[i];
+                i += 1;
+                payload.cc_body = zir.bodySlice(i, cc_body_len);
+                i += payload.cc_body.len;
+            } else if (bits.has_cc_ref) {
+                payload.cc_ref = @fromBackingInt(@intCast(zir.extra[i]));
+                i += 1;
             }
-            if (extra.data.bits.has_ret_ty_body) {
-                const body_len = zir.extra[extra_index];
-                extra_index += 1;
-                ret_ty_body = zir.bodySlice(extra_index, body_len);
-                extra_index += ret_ty_body.len;
-            } else if (extra.data.bits.has_ret_ty_ref) {
-                ret_ty_ref = @fromBackingInt(@intCast(zir.extra[extra_index]));
-                extra_index += 1;
-            } else {
-                ret_ty_ref = .void_type;
+            if (bits.has_ret_ty_body) {
+                const ret_ty_body_len = zir.extra[i];
+                i += 1;
+                payload.ret_ty_ref = .none;
+                payload.ret_ty_body = zir.bodySlice(i, ret_ty_body_len);
+                i += payload.ret_ty_body.len;
+            } else if (bits.has_ret_ty_ref) {
+                payload.ret_ty_ref = @fromBackingInt(@intCast(zir.extra[i]));
+                i += 1;
             }
-
-            extra_index += @intFromBool(extra.data.bits.has_any_noalias);
-
-            const body = zir.bodySlice(extra_index, extra.data.body_len);
-            extra_index += body.len;
-            break :blk .{
-                .param_block = extra.data.param_block,
-                .ret_ty_ref = ret_ty_ref,
-                .ret_ty_body = ret_ty_body,
-                .body = body,
-                .ret_ty_is_generic = extra.data.bits.ret_ty_is_generic,
-                .ies = extra.data.bits.is_inferred_error,
-            };
+            if (bits.has_any_noalias) {
+                payload.noalias_bits = zir.extra[i];
+                i += 1;
+            }
+            break :blk .{ i, extra.data.body_len };
         },
         else => unreachable,
     };
+    if (body_len != 0) {
+        payload.body = zir.bodySlice(extra_index, body_len);
+        extra_index += body_len;
+        const src_locs = zir.extraData(Inst.Func.SrcLocs, extra_index);
+        payload.src_locs = src_locs.data;
+        extra_index = src_locs.end;
+        payload.proto_hash = @bitCast([4]u32{
+            zir.extra[extra_index + 0],
+            zir.extra[extra_index + 1],
+            zir.extra[extra_index + 2],
+            zir.extra[extra_index + 3],
+        });
+    }
+    return payload;
+}
+
+pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
+    const tags = zir.instructions.items(.tag);
+    const payload = zir.getFnPayload(fn_inst);
     const param_body = zir.getParamBody(fn_inst);
     var total_params_len: u32 = 0;
     for (param_body) |inst| {
@@ -4803,13 +4791,13 @@ pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
     }
     return .{
         .param_body = param_body,
-        .param_body_inst = info.param_block,
-        .ret_ty_body = info.ret_ty_body,
-        .ret_ty_ref = info.ret_ty_ref,
-        .body = info.body,
+        .param_body_inst = payload.param_block,
+        .ret_ty_body = payload.ret_ty_body,
+        .ret_ty_ref = payload.ret_ty_ref,
+        .body = payload.body,
         .total_params_len = total_params_len,
-        .ret_ty_is_generic = info.ret_ty_is_generic,
-        .inferred_error_set = info.ies,
+        .ret_ty_is_generic = payload.ret_ty_is_generic,
+        .inferred_error_set = payload.is_inferred_error,
     };
 }
 
@@ -4898,51 +4886,8 @@ pub fn getAssociatedSrcHash(zir: Zir, inst: Zir.Inst.Index) ?std.zig.SrcHash {
                 extra.data.src_hash_3,
             });
         },
-        .func, .func_inferred => {
-            const pl_node = data[@backingInt(inst)].pl_node;
-            const extra = zir.extraData(Inst.Func, pl_node.payload_index);
-            if (extra.data.body_len == 0) {
-                // Function type or extern fn - no associated hash
-                return null;
-            }
-            const extra_index = extra.end +
-                extra.data.ret_ty.body_len +
-                extra.data.body_len +
-                @typeInfo(Inst.Func.SrcLocs).@"struct".field_names.len;
-            return @bitCast([4]u32{
-                zir.extra[extra_index + 0],
-                zir.extra[extra_index + 1],
-                zir.extra[extra_index + 2],
-                zir.extra[extra_index + 3],
-            });
-        },
-        .func_fancy => {
-            const pl_node = data[@backingInt(inst)].pl_node;
-            const extra = zir.extraData(Inst.FuncFancy, pl_node.payload_index);
-            if (extra.data.body_len == 0) {
-                // Function type or extern fn - no associated hash
-                return null;
-            }
-            const bits = extra.data.bits;
-            var extra_index = extra.end;
-            if (bits.has_cc_body) {
-                const body_len = zir.extra[extra_index];
-                extra_index += 1 + body_len;
-            } else extra_index += @intFromBool(bits.has_cc_ref);
-            if (bits.has_ret_ty_body) {
-                const body_len = zir.extra[extra_index];
-                extra_index += 1 + body_len;
-            } else extra_index += @intFromBool(bits.has_ret_ty_ref);
-            extra_index += @intFromBool(bits.has_any_noalias);
-            extra_index += extra.data.body_len;
-            extra_index += @typeInfo(Zir.Inst.Func.SrcLocs).@"struct".field_names.len;
-            return @bitCast([4]u32{
-                zir.extra[extra_index + 0],
-                zir.extra[extra_index + 1],
-                zir.extra[extra_index + 2],
-                zir.extra[extra_index + 3],
-            });
-        },
+        // A function type or extern fn has no body and so no associated hash.
+        .func, .func_inferred, .func_fancy => return zir.getFnPayload(inst).proto_hash,
         .extended => {},
         else => return null,
     }
