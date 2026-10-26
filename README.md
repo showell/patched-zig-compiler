@@ -1,3 +1,6 @@
+> **This is a patched Zig 0.17.0.** What we changed, why, and how to install
+> and pin it: [PATCHES.md](PATCHES.md). Below is Zig's own README, unchanged.
+
 ![ZIG](https://ziglang.org/img/zig-logo-dynamic.svg)
 
 A general-purpose programming language and toolchain for maintaining

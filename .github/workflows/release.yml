@@ -1,0 +1,113 @@
+# Build the patched compiler and publish it as a release.
+#
+# Pushing a tag `patched.N` builds version `0.17.0+patched.N` the way Zig's
+# own release CI builds 0.17.0 (ci/x86_64-linux-release.sh at tag 0.17.0):
+# a static x86_64-linux-musl compiler, CMake + Ninja against Zig's prebuilt
+# LLVM 22 bundle, so no LLVM is built here. It then runs the patches' own
+# checks and the behavior tests, and attaches
+# zig-x86_64-linux-0.17.0+patched.N.tar.xz (laid out as ziglang.org's
+# tarballs: zig, lib/, doc/, LICENSE, README.md) and its .sha256 to the
+# release. A build that fails a check publishes nothing.
+name: release
+
+on:
+  push:
+    tags: ["patched.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag patched.N to build (no release is published)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TARGET: x86_64-linux-musl
+  MCPU: baseline
+  BUNDLE: zig+llvm+lld+clang-x86_64-linux-musl-0.17.0-dev.203+073889523
+  BUNDLE_URL: https://ziglang.org/deps/zig%2Bllvm%2Blld%2Bclang-x86_64-linux-musl-0.17.0-dev.203%2B073889523.tar.xz
+  # Taken from the download on 2026-10-26.
+  BUNDLE_SHA256: a88f904d5a7d60348bcd1189792ccb201ca80c49fd2497c3215381413fe330af
+
+defaults:
+  run:
+    # bash -eo pipefail: a failing test piped to tail fails its step.
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Name the build
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in patched.[0-9]*) ;; *) echo "not a patched.N tag: $tag"; exit 1 ;; esac
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=0.17.0+${tag}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -yq cmake ninja-build
+
+      - name: LLVM bundle
+        run: |
+          curl -sSfLo bundle.tar.xz "$BUNDLE_URL"
+          echo "$BUNDLE_SHA256  bundle.tar.xz" | sha256sum -c
+          mkdir -p "$HOME/deps" && tar xf bundle.tar.xz -C "$HOME/deps" && rm bundle.tar.xz
+
+      - name: Build
+        run: |
+          PREFIX="$HOME/deps/$BUNDLE"
+          ZIG="$PREFIX/bin/zig"
+          mkdir -p build-release && cd build-release
+          cmake .. \
+            -DCMAKE_INSTALL_PREFIX="stage3-release" \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$ZIG;cc;-target;$TARGET;-mcpu=$MCPU" \
+            -DCMAKE_CXX_COMPILER="$ZIG;c++;-target;$TARGET;-mcpu=$MCPU" \
+            -DZIG_TARGET_TRIPLE="$TARGET" \
+            -DZIG_TARGET_MCPU="$MCPU" \
+            -DZIG_STATIC=ON \
+            -DZIG_NO_LIB=ON \
+            -DZIG_VERSION="$VERSION" \
+            -GNinja
+          ninja install
+
+      - name: Package
+        run: |
+          name="zig-x86_64-linux-$VERSION"
+          mkdir -p "dist/$name"
+          cp build-release/stage3-release/bin/zig "dist/$name/zig"
+          cp -r lib doc LICENSE README.md "dist/$name/"
+          (cd dist && tar cJf "$name.tar.xz" "$name" && sha256sum "$name.tar.xz" > "$name.tar.xz.sha256")
+          echo "NAME=$name" >> "$GITHUB_ENV"
+          "dist/$name/zig" version
+          [ "$("dist/$name/zig" version)" = "$VERSION" ]
+
+      - name: The patches' checks
+        run: patched/check.sh "dist/$NAME/zig"
+
+      - name: Behavior tests (LLVM backend)
+        run: |
+          cd "$RUNNER_TEMP" && cp -r "$GITHUB_WORKSPACE/test" . && \
+          "$GITHUB_WORKSPACE/dist/$NAME/zig" test test/behavior.zig -fllvm -OReleaseSafe 2>&1 | tail -3
+
+      - name: Behavior tests (self-hosted backend)
+        run: |
+          cd "$RUNNER_TEMP" && \
+          "$GITHUB_WORKSPACE/dist/$NAME/zig" test test/behavior.zig -fno-llvm -fno-lld 2>&1 | tail -3
+
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "dist/$NAME.tar.xz" "dist/$NAME.tar.xz.sha256" \
+            --title "Zig $VERSION" \
+            --notes "Zig 0.17.0 with this repository's patches (see PATCHES.md). Version string: \`$VERSION\`."
