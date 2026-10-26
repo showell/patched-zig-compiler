@@ -385,7 +385,10 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
 
             const buf = allocated_slice[@sizeOf(Node)..];
             const end_index = @atomicLoad(usize, &node.end_index, .monotonic);
-            const aligned_index = alignedIndex(buf.ptr, end_index, alignment);
+            // A fast-path reservation that did not fit is left in `end_index`, past
+            // the end of `buf`; nothing beyond `buf.len` is in use, so grow from there,
+            // not from the overshoot, or the node grows by the request twice.
+            const aligned_index = alignedIndex(buf.ptr, @min(end_index, buf.len), alignment);
             const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
 
             if (new_size <= allocated_slice.len) {
