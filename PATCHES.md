@@ -23,8 +23,9 @@ compiler laid out as ziglang.org's tarballs.
 |---|---|---|
 | `Zir: decode a function's payload in one place (getFnPayload)` | A generic function's debug line rows (prologue, epilogue) past the end of its file, when its return type names a parameter: `Sema.zirFunc` read `SrcLocs` from the body. Six hand-walks of a function's ZIR payload become one decoder. | draft: essay-repl-server `notes/zig-issue-generic-debug-lines.md` |
 | `std.heap.ArenaAllocator: grow by the request once, not twice` | A request that doesn't fit the arena's node grew it by twice the request (the fast path's failed reservation counted again). | draft: essay-repl-server `notes/zig-issue-arena-overshoot.md` |
+| `std.Io: one createDirPath walk, forward-only once a component exists` | `createDirPath("./a/b")` looped forever when the working directory had been deleted (`.` exists, but nothing can be made in it). The walk, copied in `Threaded`, `Uring` and `Dispatch`, is one function (`Dir.createDirPathWalk`) that never steps back once a component exists. | y2kbugger's report: gist.github.com/y2kbugger/7143243463a973e490b11b1bac72d48a |
 
-`patched/check.sh <zig>` checks both: each fails on unpatched 0.17.0.
+`patched/check.sh <zig>` checks all three: each fails on unpatched 0.17.0.
 
 ## Using it
 

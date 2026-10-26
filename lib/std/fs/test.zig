@@ -1358,6 +1358,23 @@ test "createDirPath in a directory that no longer exists" {
     try expectError(error.FileNotFound, tmp.dir.createDirPath(io, "sub-path"));
 }
 
+test "createDirPath through . in a directory that no longer exists" {
+    if (native_os == .windows) return error.SkipZigTest; // Windows returns FileBusy if attempting to remove an open dir
+    if (native_os == .dragonfly) return error.SkipZigTest; // DragonflyBSD does not produce error (hammer2 fs)
+
+    const io = testing.io;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.deleteTree(io, &tmp.sub_path);
+
+    // `.` still names the removed directory (it exists, and is a directory)
+    // while every mkdir inside it fails with FileNotFound: the walk must not
+    // step back to `.` again once it has found it.
+    try expectError(error.FileNotFound, tmp.dir.createDirPath(io, "./sub-path"));
+    try expectError(error.FileNotFound, tmp.dir.createDirPath(io, "./sub-path/more"));
+}
+
 test "createDirPath but sub_path contains pre-existing file" {
     const io = testing.io;
 

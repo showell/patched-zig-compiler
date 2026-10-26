@@ -2641,29 +2641,19 @@ fn dirCreateDirPath(
     permissions: Dir.Permissions,
 ) Dir.CreateDirPathError!Dir.CreatePathStatus {
     const ev: *Evented = @ptrCast(@alignCast(userdata));
+    const Ops = struct {
+        ev: *Evented,
+        dir: Dir,
+        permissions: Dir.Permissions,
 
-    var it = Dir.path.componentIterator(sub_path);
-    var status: Dir.CreatePathStatus = .existed;
-    var component = it.last() orelse return error.BadPathName;
-    while (true) {
-        if (dirCreateDir(ev, dir, component.path, permissions)) |_| {
-            status = .created;
-        } else |err| switch (err) {
-            error.PathAlreadyExists => {
-                // stat the file and return an error if it's not a directory
-                // this is important because otherwise a dangling symlink
-                // could cause an infinite loop
-                const kind = try ev.filePathKind(dir, component.path);
-                if (kind != .directory) return error.NotDir;
-            },
-            error.FileNotFound => |e| {
-                component = it.previous() orelse return e;
-                continue;
-            },
-            else => |e| return e,
+        pub fn createDir(ops: @This(), component: []const u8) Dir.CreateDirError!void {
+            return dirCreateDir(ops.ev, ops.dir, component, ops.permissions);
         }
-        component = it.next() orelse return status;
-    }
+        pub fn isDir(ops: @This(), component: []const u8) Dir.StatFileError!bool {
+            return try ops.ev.filePathKind(ops.dir, component) == .directory;
+        }
+    };
+    return Dir.createDirPathWalk(sub_path, Ops{ .ev = ev, .dir = dir, .permissions = permissions });
 }
 
 fn filePathKind(ev: *Evented, dir: Dir, sub_path: []const u8) !File.Kind {
