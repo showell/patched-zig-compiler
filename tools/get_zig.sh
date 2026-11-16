@@ -9,7 +9,8 @@
 #     cd <project> && <this checkout>/tools/get_zig.sh
 #     cd <project> && curl -fsSL https://raw.githubusercontent.com/showell/patched-zig-compiler/main/tools/get_zig.sh | sh
 #
-# A version is `0.17.0+patched.N`, released under the tag `patched.N`.
+# A version is `<zig>+patched.N` (`0.17.1+patched.3`), released under the tag
+# `patched.N`.
 set -eu
 
 if [ -f zig-version ]; then
@@ -21,7 +22,7 @@ else
 fi
 case "$pin" in
     *+patched.[0-9]*) ;;
-    *) echo "get_zig: $from names $pin, not a 0.17.0+patched.N version" >&2; exit 1 ;;
+    *) echo "get_zig: $from names $pin, not a <zig>+patched.N version" >&2; exit 1 ;;
 esac
 
 case "$(uname -s) $(uname -m)" in

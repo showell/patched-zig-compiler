@@ -1,11 +1,12 @@
 # Build the patched compiler and publish it as a release.
 #
-# Pushing a tag `patched.N` builds version `0.17.0+patched.N` the way Zig's
-# own release CI builds 0.17.0 (ci/x86_64-linux-release.sh at tag 0.17.0):
+# Pushing a tag `patched.N` builds version `<base>+patched.N`, where <base> is
+# the Zig release this tree holds (build.zig's `zig_version`), the way Zig's
+# own release CI builds it (ci/x86_64-linux-release.sh at that release's tag):
 # a static x86_64-linux-musl compiler, CMake + Ninja against Zig's prebuilt
 # LLVM 22 bundle, so no LLVM is built here. It then runs the patches' own
 # checks and the behavior tests, and attaches
-# zig-x86_64-linux-0.17.0+patched.N.tar.xz (laid out as ziglang.org's
+# zig-x86_64-linux-<base>+patched.N.tar.xz (laid out as ziglang.org's
 # tarballs: zig, lib/, doc/, LICENSE, README.md) and its .sha256 to the
 # release. A build that fails a check publishes nothing.
 name: release
@@ -27,7 +28,8 @@ env:
   MCPU: baseline
   BUNDLE: zig+llvm+lld+clang-x86_64-linux-musl-0.17.0-dev.203+073889523
   BUNDLE_URL: https://ziglang.org/deps/zig%2Bllvm%2Blld%2Bclang-x86_64-linux-musl-0.17.0-dev.203%2B073889523.tar.xz
-  # Taken from the download on 2026-10-26.
+  # Taken from the download on 2026-10-26. 0.17.1's release CI names the
+  # same bundle.
   BUNDLE_SHA256: a88f904d5a7d60348bcd1189792ccb201ca80c49fd2497c3215381413fe330af
 
 defaults:
@@ -45,11 +47,17 @@ jobs:
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           case "$tag" in patched.[0-9]*) ;; *) echo "not a patched.N tag: $tag"; exit 1 ;; esac
           echo "TAG=$tag" >> "$GITHUB_ENV"
-          echo "VERSION=0.17.0+${tag}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+
+      - name: Version, from build.zig
+        run: |
+          base=$(sed -n 's/^const zig_version: std.SemanticVersion = .{ .major = \([0-9]*\), .minor = \([0-9]*\), .patch = \([0-9]*\) };$/\1.\2.\3/p' build.zig)
+          [ -n "$base" ] || { echo "build.zig's zig_version line is not where this step reads it"; exit 1; }
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          echo "VERSION=$base+$TAG" >> "$GITHUB_ENV"
 
       - name: Tools
         run: sudo apt-get update -q && sudo apt-get install -yq cmake ninja-build
@@ -110,4 +118,4 @@ jobs:
         run: |
           gh release create "$TAG" "dist/$NAME.tar.xz" "dist/$NAME.tar.xz.sha256" \
             --title "Zig $VERSION" \
-            --notes "Zig 0.17.0 with this repository's patches (see PATCHES.md). Version string: \`$VERSION\`."
+            --notes "Zig $BASE with this repository's patches (see PATCHES.md). Version string: \`$VERSION\`."

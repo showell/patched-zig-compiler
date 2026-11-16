@@ -1,6 +1,6 @@
 #!/bin/sh
 # The patches' own checks, against a built compiler: check.sh <zig>
-# Each fails on unpatched 0.17.0 and passes with the patches.
+# Each fails on unpatched 0.17.0 and 0.17.1 and passes with the patches.
 set -eu
 zig=$1
 here=$(cd "$(dirname "$0")" && pwd)

@@ -1,20 +1,24 @@
-# Patched Zig 0.17.0
+# Patched Zig 0.17.1
 
-Zig 0.17.0 as released, plus fixes we need and have reported upstream. The
+Zig 0.17.1 as released, plus fixes we need and have reported upstream. The
 compiler our projects build with; each release is a static x86_64-linux
 compiler laid out as ziglang.org's tarballs.
 
 - **The history is the record.** The first commit is the 0.17.0 source
-  tarball, unchanged (tag `upstream-0.17.0`); each patch is one commit
-  after it, its message saying the bug, the fix, and how it was tested.
-  `git diff upstream-0.17.0` is everything we changed.
-- **A release** is a tag `patched.N`; it builds version `0.17.0+patched.N`
-  (`zig version` says so; the `+patched.N` is semver build metadata, so a
-  package's `minimum_zig_version = "0.17.0"` still holds).
+  tarball, unchanged (tag `upstream-0.17.0`), and the next is 0.17.1's
+  (tag `upstream-0.17.1`), so `git diff upstream-0.17.0 upstream-0.17.1`
+  is upstream's point release. Each patch is one commit after those, its
+  message saying the bug, the fix, and how it was tested.
+  `git diff upstream-0.17.1` is everything we changed.
+- **A release** is a tag `patched.N`; it builds version `<zig>+patched.N`,
+  where `<zig>` is the release in `build.zig` (`zig version` says so; the
+  `+patched.N` is semver build metadata, so a package's
+  `minimum_zig_version = "0.17.1"` still holds). `patched.1` and
+  `patched.2` are 0.17.0; from `patched.3` they are 0.17.1.
   `.github/workflows/release.yml` builds it the way Zig's own release CI
-  builds 0.17.0, against Zig's prebuilt LLVM 22 bundle, runs the patches'
+  builds its release, against Zig's prebuilt LLVM 22 bundle, runs the patches'
   checks and the behavior tests, and publishes
-  `zig-x86_64-linux-0.17.0+patched.N.tar.xz` with its `.sha256`. `zig-version`
+  `zig-x86_64-linux-<zig>+patched.N.tar.xz` with its `.sha256`. `zig-version`
   names the newest release.
 
 ## The patches
@@ -25,7 +29,9 @@ compiler laid out as ziglang.org's tarballs.
 | `std.heap.ArenaAllocator: grow by the request once, not twice` | A request that doesn't fit the arena's node grew it by twice the request (the fast path's failed reservation counted again). | draft: essay-repl-server `notes/zig-issue-arena-overshoot.md` |
 | `std.Io: one createDirPath walk, forward-only once a component exists` | `createDirPath("./a/b")` looped forever when the working directory had been deleted (`.` exists, but nothing can be made in it). The walk, copied in `Threaded`, `Uring` and `Dispatch`, is one function (`Dir.createDirPathWalk`) that never steps back once a component exists. | y2kbugger's report: gist.github.com/y2kbugger/7143243463a973e490b11b1bac72d48a |
 
-`patched/check.sh <zig>` checks all three: each fails on unpatched 0.17.0.
+`patched/check.sh <zig>` checks all three: each fails on unpatched 0.17.0
+and on unpatched 0.17.1 (checked against ziglang.org's 0.17.1 binary on
+2026-11-16), so 0.17.1 fixed none of the three.
 
 ## Using it
 
@@ -38,7 +44,7 @@ It installs the version the project's `zig-version` names into
 on the PATH). With no `zig-version` there, the newest release.
 
 **Pin a project**: a `zig-version` file at its root holding the version
-(`0.17.0+patched.1`), and in its `build.zig`:
+(`0.17.1+patched.3`), and in its `build.zig`:
 
 ```zig
 // The pinned compiler: zig-version, from github.com/showell/patched-zig-compiler
@@ -51,7 +57,7 @@ comptime {
 }
 ```
 
-Any other compiler, stock 0.17.0 included, then stops at the build's first
+Any other compiler, stock 0.17.1 included, then stops at the build's first
 line with that message.
 
 **A new patch**: one commit on `main` (its message as the others'), a check
@@ -60,4 +66,7 @@ release is up, move `zig-version` and the projects' pins.
 
 **A new Zig**: when upstream ships the fixes (or a new release we move to),
 start from that release's tarball the same way and carry over only the
-patches it still needs.
+patches it still needs: commit the tarball on top of the last upstream
+commit (tag it `upstream-<version>`), `git rebase --onto upstream-<new>
+upstream-<old>`, then run `patched/check.sh` against the stock binary to
+see which bugs remain.
