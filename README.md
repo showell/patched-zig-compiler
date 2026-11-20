@@ -1,5 +1,7 @@
 > **This is a patched Zig 0.17.1.** What we changed, why, and how to install
-> and pin it: [PATCHES.md](PATCHES.md). Below is Zig's own README, unchanged.
+> and pin it: [PATCHES.md](PATCHES.md). The patches were written by AI coding
+> agents (Claude), with human supervision; Zig itself is upstream's. Below is
+> Zig's own README, unchanged.
 
 ![ZIG](https://ziglang.org/img/zig-logo-dynamic.svg)
 
